@@ -1,0 +1,59 @@
+name: Compilar VicentMusic IPA (iOS)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build-ios:
+    runs-on: macos-14
+    steps:
+      - name: Descargar codigo
+        uses: actions/checkout@v4
+
+      - name: Instalar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Instalar dependencias
+        run: npm install --legacy-peer-deps
+
+      - name: Generar proyecto nativo iOS (Expo Prebuild)
+        run: npx expo prebuild --platform ios --clean
+
+      - name: Compilar aplicacion iOS (Release sin firma)
+        run: |
+          cd ios
+          WORKSPACE=$(ls -d *.xcworkspace | head -n 1)
+          SCHEME=$(basename "$WORKSPACE" .xcworkspace)
+          echo "Compilando Workspace: $WORKSPACE con Scheme: $SCHEME"
+          
+          xcodebuild -workspace "$WORKSPACE" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            archive -archivePath "$PWD/build/App.xcarchive" \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Empaquetar archivo .ipa para Sideloadly
+        run: |
+          cd ios
+          mkdir -p Payload
+          APP_DIR=$(find "$PWD/build/App.xcarchive/Products/Applications" -name "*.app" -maxdepth 1 | head -n 1)
+          echo "Empaquetando app encontrada en: $APP_DIR"
+          cp -r "$APP_DIR" Payload/
+          zip -qr VicentMusic.ipa Payload
+          mv VicentMusic.ipa ../VicentMusic.ipa
+
+      - name: Subir VicentMusic.ipa como archivo descargable
+        uses: actions/upload-artifact@v4
+        with:
+          name: VicentMusic-iOS-Instalador
+          path: VicentMusic.ipa
+          retention-days: 7
