@@ -160,12 +160,13 @@ class DatabaseService {
               [s.uri, s.duration, s.format ?? 'mp3', s.id]
             );
           }
-          // Limpiar canciones de demo remotas y pistas de streaming de YouTube que tenían is_downloaded ficticio
+          // Solo marcar como NO descargadas aquellas canciones que sean streaming remoto (http/https)
+          // y mantener SIEMPRE como descargadas las que tienen archivo local físico en el iPhone (file:// o asset://)
           await db.runAsync(
-            `UPDATE songs SET is_downloaded = 0 WHERE id NOT IN ('s1', 's2') AND (uri LIKE 'http%' OR uri LIKE 'https%' OR id LIKE 'yt_%' OR genre = 'YouTube');`
+            `UPDATE songs SET is_downloaded = 0 WHERE (uri LIKE 'http://%' OR uri LIKE 'https://%') AND uri NOT LIKE 'file://%';`
           );
           await db.runAsync(
-            `UPDATE songs SET is_downloaded = 1 WHERE id IN ('s1', 's2');`
+            `UPDATE songs SET is_downloaded = 1 WHERE uri LIKE 'file://%' OR uri LIKE 'asset://%';`
           );
         }
 

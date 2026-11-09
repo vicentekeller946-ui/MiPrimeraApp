@@ -333,7 +333,7 @@ class DownloadService {
     thumbnail?: string;
   }): Promise<Song> {
     const cleanId = `yt_${item.videoId}`;
-    const backendUrl = process.env.EXPO_PUBLIC_BACKEND_URL?.trim();
+    const backendUrl = process.env.EXPO_PUBLIC_BACKEND_URL?.trim() || 'http://192.168.1.8:4000';
 
     // Si el usuario configuró el backend de conversión a MP3:
     if (backendUrl && backendUrl.length > 5) {

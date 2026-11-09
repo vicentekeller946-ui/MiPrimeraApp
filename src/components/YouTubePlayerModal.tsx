@@ -71,13 +71,20 @@ export default function YouTubePlayerModal({
     }
     try {
       setIsSaving(true);
-      await DownloadService.getInstance().downloadYouTubeItem(item);
+      const savedSong = await DownloadService.getInstance().downloadYouTubeItem(item);
       setIsSaved(true);
       onDownloaded?.();
-      Alert.alert(
-        '¡Guardada en Mi Música!',
-        `"${item.title}" se ha guardado en tu colección de VicentMusic para ver y escuchar el vídeo oficial cuando tengas conexión.\n\nNota: Por políticas de derechos de autor de Google, YouTube no permite descargar archivos MP3 a la memoria física del teléfono. Para escuchar música 100% offline y con la pantalla apagada, puedes importar tus archivos MP3 desde la pestaña "Descargas".`
-      );
+      if (savedSong.isDownloaded) {
+        Alert.alert(
+          '¡Descarga MP3 completada!',
+          `"${item.title}" se ha descargado en tu iPhone como archivo MP3.\nPuedes escucharla sin internet y con la pantalla apagada.`
+        );
+      } else {
+        Alert.alert(
+          'Guardada en Mi Música',
+          `"${item.title}" está guardada en tu colección.`
+        );
+      }
     } catch (e: any) {
       Alert.alert('Error', e.message || 'No se pudo guardar la canción.');
     } finally {
