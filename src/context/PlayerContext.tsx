@@ -234,6 +234,12 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       next();
     });
 
+    playerService.setOnTrackChanged((index, song) => {
+      // Sincronizar cola y estado cuando se cambia de pista desde la pantalla de bloqueo
+      dispatch({ type: 'SET_SONG', song, index });
+      DatabaseService.getInstance().recordPlay(song.id);
+    });
+
     return () => {
       unsubscribe();
     };
@@ -247,11 +253,19 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   }, [state.currentSong, state.isPlaying, state.position]);
 
   const playSong = async (song: Song, queue?: Song[], index?: number) => {
-    const targetQueue = queue ?? stateRef.current.queue;
-    const targetIndex = index ?? (targetQueue.length > 0 ? targetQueue.findIndex((s) => s.id === song.id) : 0);
-    dispatch({ type: 'SET_SONG', song, queue: targetQueue, index: Math.max(0, targetIndex) });
+    let targetQueue = queue ?? stateRef.current.queue;
+    if (!targetQueue || targetQueue.length === 0) {
+      const allSongs = await DatabaseService.getInstance().getAllSongs();
+      targetQueue = allSongs.length > 0 ? allSongs : [song];
+      if (!targetQueue.some((s) => s.id === song.id)) {
+        targetQueue = [song, ...targetQueue];
+      }
+    }
+    const targetIndex = index ?? Math.max(0, targetQueue.findIndex((s) => s.id === song.id));
+    const validIndex = Math.max(0, targetIndex);
+    dispatch({ type: 'SET_SONG', song, queue: targetQueue, index: validIndex });
     await DatabaseService.getInstance().recordPlay(song.id);
-    await PlayerService.getInstance().loadSong(song);
+    await PlayerService.getInstance().loadSong(song, targetQueue, validIndex);
   };
 
   const togglePlay = async () => {
@@ -277,6 +291,12 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       return;
     }
 
+    // 2. Si hay lista de reproducción nativa activa, delegar a AudioPlaylist
+    if (PlayerService.getInstance().hasPlaylist()) {
+      await PlayerService.getInstance().next();
+      return;
+    }
+
     if (!currentState.queue || currentState.queue.length === 0) {
       const allSongs = await DatabaseService.getInstance().getAllSongs();
       if (allSongs.length > 0) {
@@ -294,23 +314,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       nextIndex = currentState.queueIndex + 1;
     }
 
-    // 2. Si se llega al final de la cola o solo había 1 canción:
     if (nextIndex >= currentState.queue.length) {
-      if (currentState.queue.length > 1) {
-        // Reiniciar la cola automáticamente para reproducción continua
-        nextIndex = 0;
-      } else {
-        // Si solo había 1 canción, buscar automáticamente otra de la biblioteca para que nunca se detenga
-        const allSongs = await DatabaseService.getInstance().getAllSongs();
-        const otherSongs = allSongs.filter((s) => s.id !== currentState.currentSong?.id);
-        if (otherSongs.length > 0) {
-          const autoNext = otherSongs[Math.floor(Math.random() * otherSongs.length)];
-          await playSong(autoNext, allSongs);
-          return;
-        } else {
-          nextIndex = 0;
-        }
-      }
+      nextIndex = 0;
     }
 
     const nextSong = currentState.queue[nextIndex];
@@ -322,19 +327,24 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         index: nextIndex,
       });
       await DatabaseService.getInstance().recordPlay(nextSong.id);
-      await PlayerService.getInstance().loadSong(nextSong);
+      await PlayerService.getInstance().loadSong(nextSong, currentState.queue, nextIndex);
     }
   };
 
   const previous = async () => {
     const currentState = stateRef.current;
-    if (!currentState.queue || currentState.queue.length === 0) return;
-
     if (currentState.position > 3) {
       await PlayerService.getInstance().seekTo(0);
       dispatch({ type: 'SET_POSITION', position: 0 });
       return;
     }
+
+    if (PlayerService.getInstance().hasPlaylist()) {
+      await PlayerService.getInstance().previous();
+      return;
+    }
+
+    if (!currentState.queue || currentState.queue.length === 0) return;
 
     const prevIndex = currentState.queueIndex - 1;
     if (prevIndex < 0) {
@@ -351,7 +361,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         index: prevIndex,
       });
       await DatabaseService.getInstance().recordPlay(prevSong.id);
-      await PlayerService.getInstance().loadSong(prevSong);
+      await PlayerService.getInstance().loadSong(prevSong, currentState.queue, prevIndex);
     }
   };
 

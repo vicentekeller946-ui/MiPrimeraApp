@@ -1,15 +1,20 @@
 /**
  * VicentMusic — Native Audio Engine (expo-audio)
  *
- * Utiliza expo-audio para reproducción real de audio de alta fidelidad,
- * controles de pantalla de bloqueo y reproducción en segundo plano.
- * Compatible con iOS, Android y Web.
+ * Utiliza AudioPlaylist de expo-audio para:
+ * 1. Reproducción continua automática (Next automático al terminar pista).
+ * 2. Controles de pantalla de bloqueo y Centro de Control con botones
+ *    de Siguiente (Next) y Anterior (Previous) ACTIVOS y funcionales.
+ * 3. Reproducción en segundo plano con pantalla apagada.
  */
 
 import {
+  createAudioPlaylist,
   createAudioPlayer,
   setAudioModeAsync,
+  type AudioPlaylist,
   type AudioPlayer,
+  type AudioPlaylistStatus,
   type AudioStatus,
 } from 'expo-audio';
 import { Asset } from 'expo-asset';
@@ -40,8 +45,13 @@ export type PlaybackListener = (status: PlaybackStatus) => void;
 class PlayerService {
   private static instance: PlayerService;
 
-  private player: AudioPlayer | null = null;
+  private playlist: AudioPlaylist | null = null;
+  private singlePlayer: AudioPlayer | null = null;
+
   private currentSong: Song | null = null;
+  private currentQueue: Song[] = [];
+  private currentIndex = 0;
+
   private isPlaying = false;
   private position = 0;
   private duration = 0;
@@ -52,6 +62,7 @@ class PlayerService {
 
   private listeners: Set<PlaybackListener> = new Set();
   private onTrackEndedCallback: (() => void) | null = null;
+  private onTrackChangedCallback: ((index: number, song: Song) => void) | null = null;
 
   private constructor() {}
 
@@ -63,7 +74,7 @@ class PlayerService {
   }
 
   /**
-   * Configura el modo de audio para permitir reproducción en segundo plano y con la pantalla bloqueada o en silencio
+   * Configura el modo de audio para segundo plano y controles en pantalla de bloqueo
    */
   private async configureAudioMode(): Promise<void> {
     try {
@@ -90,6 +101,10 @@ class PlayerService {
     this.onTrackEndedCallback = callback;
   }
 
+  setOnTrackChanged(callback: (index: number, song: Song) => void): void {
+    this.onTrackChangedCallback = callback;
+  }
+
   private notifyListeners(): void {
     const status: PlaybackStatus = {
       isPlaying: this.isPlaying,
@@ -110,12 +125,11 @@ class PlayerService {
   }
 
   /**
-   * Resuelve el origen de audio de forma segura para expo-audio:
-   * Descarga previa de assets a caché local y verificación de archivos en disco.
+   * Resuelve el origen de audio para expo-audio
    */
   private async resolveAudioSource(song: Song): Promise<any> {
     try {
-      // 1. Si es un asset empaquetado (asset://...)
+      // 1. Asset empaquetado (asset://...)
       if (song.uri && song.uri.startsWith('asset://')) {
         const assetId = BUNDLED_AUDIO_ASSETS[song.uri] ?? DEFAULT_AUDIO_ASSET;
         const asset = Asset.fromModule(assetId);
@@ -123,86 +137,115 @@ class PlayerService {
         return { uri: asset.localUri ?? asset.uri };
       }
 
-      // 2. Si es una ruta local del teléfono (file:// o ruta de almacenamiento /music/)
+      // 2. Archivo local descargado en el teléfono (file:// o /music/)
       if (song.uri && (song.uri.startsWith('file://') || song.uri.includes('/music/'))) {
         const info = await FileSystem.getInfoAsync(song.uri);
         if (info.exists) {
           return { uri: song.uri };
         }
-        console.warn('[PlayerService] Archivo local no encontrado en disco, usando audio base:', song.uri);
+        console.warn('[PlayerService] Archivo local no encontrado en disco, usando fallback:', song.uri);
         const fallback = Asset.fromModule(DEFAULT_AUDIO_ASSET);
         await fallback.downloadAsync();
         return { uri: fallback.localUri ?? fallback.uri };
       }
 
-      // 3. Si es una URL remota http/https
+      // 3. URL remota http/https
       if (song.uri && (song.uri.startsWith('http://') || song.uri.startsWith('https://'))) {
         return { uri: song.uri };
       }
 
-      // 4. Fallback por defecto garantizado
+      // 4. Fallback garantizado
       const fallback = Asset.fromModule(DEFAULT_AUDIO_ASSET);
       await fallback.downloadAsync();
       return { uri: fallback.localUri ?? fallback.uri };
     } catch (e) {
-      console.warn('[PlayerService] Error resolviendo origen de audio, usando asset base:', e);
+      console.warn('[PlayerService] Error resolviendo origen de audio:', e);
       return DEFAULT_AUDIO_ASSET;
     }
   }
 
   /**
-   * Carga y reproduce una canción utilizando expo-audio de forma real y audible
+   * Carga y reproduce una canción utilizando AudioPlaylist nativo
+   * Permite avanzar canciones desde la pantalla de bloqueo y pasar automáticamente a la siguiente.
    */
-  async loadSong(song: Song): Promise<void> {
+  async loadSong(song: Song, queue?: Song[], index?: number): Promise<void> {
     await this.configureAudioMode();
 
     // Limpiar reproductor previo
-    if (this.player) {
-      try {
-        this.player.pause();
-        this.player.clearLockScreenControls?.();
-        this.player.remove();
-      } catch (_) {}
-      this.player = null;
-    }
+    this.cleanupCurrent();
 
     this.currentSong = song;
     this.duration = song.duration > 0 ? song.duration : 180;
     this.position = 0;
     this.isPlaying = true;
-    this.isBuffering = false;
+    this.isBuffering = true;
     this.errorMessage = null;
 
-    // Si tiene archivo local físico .mp3 descargado, DEBE reproducirse con el motor de audio nativo (expo-audio)
-    // para sonar en segundo plano y sin internet.
+    // Verificar si es un video de YouTube sin descargar
     const hasLocalFile = Boolean(
       song.uri && (song.uri.startsWith('file://') || song.uri.includes('.mp3') || song.uri.startsWith('asset://'))
     );
 
-    // Solo tratar como streaming web si NO tiene archivo de audio descargado
     if (!hasLocalFile && (song.id.startsWith('yt_') || song.uri?.includes('youtube.com') || song.genre === 'YouTube')) {
+      this.isBuffering = false;
       this.notifyListeners();
       return;
     }
 
-    this.isBuffering = true;
+    // Configurar la cola nativa
+    const targetQueue = queue && queue.length > 0 ? queue : [song];
+    this.currentQueue = targetQueue;
+    const targetIdx = index ?? Math.max(0, targetQueue.findIndex((s) => s.id === song.id));
+    this.currentIndex = Math.max(0, targetIdx);
+
     this.notifyListeners();
 
     try {
-      const source = await this.resolveAudioSource(song);
+      // Resolver fuentes para toda la cola (permite transiciones instantáneas sin pausas)
+      const resolvedSources = await Promise.all(
+        targetQueue.map((s) => this.resolveAudioSource(s))
+      );
 
-      this.player = createAudioPlayer(source, {
+      // Usar AudioPlaylist para activar Next y Previous nativos en la pantalla de bloqueo
+      this.playlist = createAudioPlaylist({
+        sources: resolvedSources,
         updateInterval: 250,
-        downloadFirst: true,
-        keepAudioSessionActive: true,
-        allowsExternalPlayback: true,
+        loop: 'all', // Reproducción continua en bucle para que nunca se detenga
       });
 
-      if (this.player) {
-        this.player.volume = this.volume;
+      if (this.playlist) {
+        this.playlist.volume = this.volume;
 
-        // Escuchar eventos reales del motor de audio
-        this.player.addListener('playbackStatusUpdate', (status: AudioStatus) => {
+        // Saltar al índice seleccionado de inmediato
+        if (this.currentIndex > 0 && this.currentIndex < resolvedSources.length) {
+          try {
+            this.playlist.skipTo(this.currentIndex);
+          } catch (_) {}
+        }
+
+        // Configurar Controles de Pantalla de Bloqueo con Next y Previous ACTIVOS
+        try {
+          this.playlist.setActiveForLockScreen(
+            true,
+            {
+              title: song.title,
+              artist: song.artist,
+              albumTitle: song.album ?? 'VicentMusic',
+              artworkUrl: song.artwork,
+            },
+            {
+              showNextTrack: true, // ¡Activa el botón Siguiente en pantalla de bloqueo!
+              showPreviousTrack: true, // ¡Activa el botón Anterior en pantalla de bloqueo!
+              showSeekForward: false,
+              showSeekBackward: false,
+            }
+          );
+        } catch (e) {
+          console.warn('[PlayerService] Aviso configurando pantalla de bloqueo:', e);
+        }
+
+        // Escuchar eventos de estado del reproductor nativo
+        this.playlist.addListener('playlistStatusUpdate', (status: AudioPlaylistStatus) => {
           this.isPlaying = status.playing;
           this.isBuffering = status.isBuffering ?? false;
           this.position = Math.max(0, Math.floor(status.currentTime));
@@ -216,99 +259,220 @@ class PlayerService {
           }
         });
 
-        // Configurar controles en la pantalla de bloqueo (iOS y Android)
-        try {
-          this.player.setActiveForLockScreen(true, {
-            title: song.title,
-            artist: song.artist,
-            albumTitle: song.album ?? 'VicentMusic',
-            artworkUrl: song.artwork,
-          });
-        } catch (e) {
-          console.warn('[PlayerService] Lock screen no disponible:', e);
-        }
+        // Escuchar cuando el usuario cambia de canción desde la pantalla de bloqueo o cuando termina una canción
+        this.playlist.addListener('trackChanged', (data: { previousIndex: number; currentIndex: number }) => {
+          const nextIdx = data.currentIndex;
+          this.currentIndex = nextIdx;
+          const newSong = this.currentQueue[nextIdx];
 
-        // Iniciar reproducción sonora real
-        this.player.play();
+          if (newSong) {
+            this.currentSong = newSong;
+            this.duration = newSong.duration > 0 ? newSong.duration : 180;
+            this.position = 0;
+
+            // Actualizar carátula y título en pantalla de bloqueo
+            try {
+              this.playlist?.updateLockScreenMetadata({
+                title: newSong.title,
+                artist: newSong.artist,
+                albumTitle: newSong.album ?? 'VicentMusic',
+                artworkUrl: newSong.artwork,
+              });
+            } catch (_) {}
+
+            this.notifyListeners();
+
+            if (this.onTrackChangedCallback) {
+              this.onTrackChangedCallback(nextIdx, newSong);
+            }
+          }
+        });
+
+        // Iniciar reproducción
+        this.playlist.play();
         this.isPlaying = true;
         this.isBuffering = false;
         this.notifyListeners();
         return;
       }
     } catch (error: any) {
-      console.error('[PlayerService] Error al reproducir audio real:', error);
+      console.warn('[PlayerService] Fallback a reproductor individual:', error);
+      // Fallback a AudioPlayer estándar si la lista fallara
+      await this.loadSinglePlayerFallback(song);
+    }
+  }
+
+  private async loadSinglePlayerFallback(song: Song): Promise<void> {
+    try {
+      const source = await this.resolveAudioSource(song);
+      this.singlePlayer = createAudioPlayer(source, {
+        updateInterval: 250,
+        keepAudioSessionActive: true,
+        allowsExternalPlayback: true,
+      });
+
+      if (this.singlePlayer) {
+        this.singlePlayer.volume = this.volume;
+        this.singlePlayer.addListener('playbackStatusUpdate', (status: AudioStatus) => {
+          this.isPlaying = status.playing;
+          this.isBuffering = status.isBuffering ?? false;
+          this.position = Math.max(0, Math.floor(status.currentTime));
+          if (status.duration && status.duration > 0) {
+            this.duration = Math.floor(status.duration);
+          }
+          this.notifyListeners();
+          if (status.didJustFinish && this.onTrackEndedCallback) {
+            this.onTrackEndedCallback();
+          }
+        });
+
+        try {
+          this.singlePlayer.setActiveForLockScreen(
+            true,
+            {
+              title: song.title,
+              artist: song.artist,
+              albumTitle: song.album ?? 'VicentMusic',
+              artworkUrl: song.artwork,
+            },
+            {
+              showNextTrack: true,
+              showPreviousTrack: true,
+            }
+          );
+        } catch (_) {}
+
+        this.singlePlayer.play();
+        this.isPlaying = true;
+        this.isBuffering = false;
+        this.notifyListeners();
+      }
+    } catch (err: any) {
+      console.error('[PlayerService] Error en fallback individual:', err);
       this.isPlaying = false;
       this.isBuffering = false;
-      this.errorMessage = error?.message || 'No se pudo reproducir este archivo de audio.';
+      this.errorMessage = err?.message || 'No se pudo reproducir este audio.';
       this.notifyListeners();
+    }
+  }
+
+  private cleanupCurrent(): void {
+    if (this.playlist) {
+      try {
+        this.playlist.pause();
+        this.playlist.clearLockScreenControls?.();
+        this.playlist.destroy?.();
+      } catch (_) {}
+      this.playlist = null;
+    }
+
+    if (this.singlePlayer) {
+      try {
+        this.singlePlayer.pause();
+        this.singlePlayer.clearLockScreenControls?.();
+        this.singlePlayer.remove?.();
+      } catch (_) {}
+      this.singlePlayer = null;
     }
   }
 
   async play(): Promise<void> {
-    if (!this.currentSong) return;
-
-    if (this.player) {
-      try {
-        this.player.play();
-        this.isPlaying = true;
-        this.notifyListeners();
-      } catch (err) {
-        console.error('[PlayerService] Error al reanudar reproducción:', err);
-      }
-    } else {
-      await this.loadSong(this.currentSong);
+    if (this.playlist) {
+      this.playlist.play();
+      this.isPlaying = true;
+      this.notifyListeners();
+      return;
+    }
+    if (this.singlePlayer) {
+      this.singlePlayer.play();
+      this.isPlaying = true;
+      this.notifyListeners();
+      return;
+    }
+    if (this.currentSong) {
+      await this.loadSong(this.currentSong, this.currentQueue, this.currentIndex);
     }
   }
 
   async pause(): Promise<void> {
-    if (this.player) {
-      try {
-        this.player.pause();
-        this.isPlaying = false;
-        this.notifyListeners();
-      } catch (err) {
-        console.error('[PlayerService] Error al pausar reproducción:', err);
-      }
-    } else {
-      this.isPlaying = false;
-      this.notifyListeners();
+    if (this.playlist) {
+      this.playlist.pause();
+    }
+    if (this.singlePlayer) {
+      this.singlePlayer.pause();
+    }
+    this.isPlaying = false;
+    this.notifyListeners();
+  }
+
+  async next(): Promise<void> {
+    if (this.playlist) {
+      this.playlist.next();
+      return;
+    }
+    if (this.onTrackEndedCallback) {
+      this.onTrackEndedCallback();
+    }
+  }
+
+  async previous(): Promise<void> {
+    if (this.playlist) {
+      this.playlist.previous();
+      return;
+    }
+    if (this.position > 3) {
+      await this.seekTo(0);
+    }
+  }
+
+  async skipTo(index: number): Promise<void> {
+    if (this.playlist) {
+      this.playlist.skipTo(index);
     }
   }
 
   async stop(): Promise<void> {
     this.isPlaying = false;
     this.position = 0;
-    if (this.player) {
-      try {
-        this.player.pause();
-        await this.player.seekTo(0);
-      } catch (_) {}
+    if (this.playlist) {
+      this.playlist.pause();
+      await this.playlist.seekTo(0);
+    }
+    if (this.singlePlayer) {
+      this.singlePlayer.pause();
+      await this.singlePlayer.seekTo(0);
     }
     this.notifyListeners();
   }
 
   async seekTo(seconds: number): Promise<void> {
     this.position = Math.max(0, Math.floor(seconds));
-    if (this.player) {
+    if (this.playlist) {
       try {
-        await this.player.seekTo(this.position);
-      } catch (err) {
-        console.error('[PlayerService] Error en seekTo:', err);
-      }
+        await this.playlist.seekTo(this.position);
+      } catch (_) {}
+    }
+    if (this.singlePlayer) {
+      try {
+        await this.singlePlayer.seekTo(this.position);
+      } catch (_) {}
     }
     this.notifyListeners();
   }
 
   async setVolume(volume: number): Promise<void> {
     this.volume = Math.max(0, Math.min(1, volume));
-    if (this.player) {
-      try {
-        this.player.volume = this.volume;
-      } catch (err) {
-        console.error('[PlayerService] Error configurando volumen:', err);
-      }
+    if (this.playlist) {
+      this.playlist.volume = this.volume;
+    }
+    if (this.singlePlayer) {
+      this.singlePlayer.volume = this.volume;
     }
     this.notifyListeners();
+  }
+
+  hasPlaylist(): boolean {
+    return this.playlist !== null;
   }
 
   getCurrentStatus(): PlaybackStatus {
