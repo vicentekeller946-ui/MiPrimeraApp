@@ -7,15 +7,25 @@ on:
 
 jobs:
   build-ios:
-    runs-on: macos-15
+    # Expo SDK 58 necesita Xcode 26.4 o superior (macos-15 solo trae Xcode 16 → error 65)
+    runs-on: macos-26
     steps:
       - name: Descargar codigo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
+
+      - name: Seleccionar la ultima version estable de Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Mostrar version de Xcode
+        run: xcodebuild -version
 
       - name: Instalar Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
-          node-version: 20
+          # Expo SDK 58 necesita Node 22.13 o superior
+          node-version: 22
           cache: 'npm'
 
       - name: Instalar dependencias
@@ -52,7 +62,7 @@ jobs:
           mv VicentMusic.ipa ../VicentMusic.ipa
 
       - name: Subir VicentMusic.ipa como archivo descargable
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: VicentMusic-iOS-Instalador
           path: VicentMusic.ipa

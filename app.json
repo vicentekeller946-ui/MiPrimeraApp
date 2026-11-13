@@ -14,7 +14,8 @@
       "infoPlist": {
         "UIBackgroundModes": [
           "audio"
-        ]
+        ],
+        "NSLocalNetworkUsageDescription": "VicentMusic busca en tu red Wi-Fi el servidor de descargas de tu PC para guardar canciones en MP3."
       }
     },
     "android": {

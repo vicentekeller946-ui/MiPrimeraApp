@@ -14,7 +14,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 import { Platform } from 'react-native';
 import StorageService from '@/services/StorageService';
 import DatabaseService from '@/services/DatabaseService';
-import { getBackendUrl } from '@/services/BackendConfig';
+import { resolveBackendUrl } from '@/services/BackendConfig';
 import type { Song, Download } from '@/types/music';
 
 export type DownloadListener = (activeDownloads: Download[]) => void;
@@ -350,7 +350,7 @@ class DownloadService {
     thumbnail?: string;
   }): Promise<Song> {
     const cleanId = `yt_${item.videoId}`;
-    const backendUrl = getBackendUrl();
+    const backendUrl = Platform.OS === 'web' ? null : await resolveBackendUrl();
 
     // Si hay backend de conversión a MP3 disponible:
     if (backendUrl) {

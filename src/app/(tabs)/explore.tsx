@@ -98,7 +98,7 @@ export default function ExploreScreen() {
       } else {
         Alert.alert(
           '¡Guardada en Mi Música!',
-          `"${ytItem.title}" se ha guardado en tu colección.\nPara descargarla en MP3 directamente, recuerda configurar tu EXPO_PUBLIC_BACKEND_URL.`
+          `"${ytItem.title}" se ha guardado en tu colección.\nPara descargarla en MP3, abre el servidor de descargas en tu PC y conecta el iPhone a la misma Wi-Fi.`
         );
       }
     } catch (e: any) {
