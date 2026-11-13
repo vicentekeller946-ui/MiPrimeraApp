@@ -200,6 +200,8 @@ const PlayerContext = createContext<PlayerContextType | null>(null);
 export function PlayerProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(playerReducer, initialState);
   const stateRef = useRef<PlayerState>(state);
+  // Referencia siempre actualizada a next(), para usarla desde los callbacks nativos de PlayerService
+  const nextRef = useRef<() => Promise<void>>(async () => {});
 
   useEffect(() => {
     stateRef.current = state;
@@ -231,7 +233,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
     playerService.setOnTrackEnded(() => {
       // Avanzar automáticamente a la siguiente canción al terminar
-      next();
+      nextRef.current();
     });
 
     playerService.setOnTrackChanged((index, song) => {
@@ -330,6 +332,10 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       await PlayerService.getInstance().loadSong(nextSong, currentState.queue, nextIndex);
     }
   };
+
+  useEffect(() => {
+    nextRef.current = next;
+  });
 
   const previous = async () => {
     const currentState = stateRef.current;

@@ -14,13 +14,21 @@ import * as FileSystem from 'expo-file-system/legacy';
 import { Platform } from 'react-native';
 import StorageService from '@/services/StorageService';
 import DatabaseService from '@/services/DatabaseService';
+import { getBackendUrl } from '@/services/BackendConfig';
 import type { Song, Download } from '@/types/music';
 
 export type DownloadListener = (activeDownloads: Download[]) => void;
 
 class DownloadService {
   private static instance: DownloadService;
-  private activeDownloads: Map<string, { download: Download; resumable?: FileSystem.DownloadResumable }> = new Map();
+  private activeDownloads: Map<
+    string,
+    {
+      download: Download;
+      resumable?: FileSystem.DownloadResumable;
+      onResult?: (p: Promise<FileSystem.FileSystemDownloadResult | undefined>) => Promise<void>;
+    }
+  > = new Map();
   private listeners: Set<DownloadListener> = new Set();
 
   private constructor() {}
@@ -181,13 +189,16 @@ class DownloadService {
 
     const resumable = FileSystem.createDownloadResumable(url, targetUri, {}, callback);
 
-    this.activeDownloads.set(downloadId, { download: downloadState, resumable });
-    this.notifyListeners();
-
-    resumable
-      .downloadAsync()
-      .then(async (result: FileSystem.FileSystemDownloadResult | undefined) => {
+    // Se usa tanto para la descarga inicial como al reanudar tras una pausa
+    // (si se pausa, downloadAsync() termina sin resultado y es resumeAsync() quien lo entrega).
+    const handleResult = (promise: Promise<FileSystem.FileSystemDownloadResult | undefined>) =>
+      promise
+      .then(async (result) => {
         if (result && result.uri) {
+          if (result.status !== 200) {
+            await FileSystem.deleteAsync(result.uri, { idempotent: true }).catch(() => {});
+            throw new Error(`El servidor respondió con el código ${result.status}.`);
+          }
           downloadState.status = 'completed';
           downloadState.progress = 1;
           downloadState.completedAt = Date.now();
@@ -219,6 +230,11 @@ class DownloadService {
         this.notifyListeners();
       });
 
+    this.activeDownloads.set(downloadId, { download: downloadState, resumable, onResult: handleResult });
+    this.notifyListeners();
+
+    handleResult(resumable.downloadAsync());
+
     return downloadState;
   }
 
@@ -242,7 +258,8 @@ class DownloadService {
     if (item && item.resumable) {
       item.download.status = 'downloading';
       this.notifyListeners();
-      await item.resumable.resumeAsync();
+      const resumed = item.resumable.resumeAsync();
+      await (item.onResult ? item.onResult(resumed) : resumed);
     }
   }
 
@@ -333,19 +350,41 @@ class DownloadService {
     thumbnail?: string;
   }): Promise<Song> {
     const cleanId = `yt_${item.videoId}`;
-    const backendUrl = process.env.EXPO_PUBLIC_BACKEND_URL?.trim() || 'http://192.168.1.8:4000';
+    const backendUrl = getBackendUrl();
 
-    // Si el usuario configuró el backend de conversión a MP3:
-    if (backendUrl && backendUrl.length > 5) {
+    // Si hay backend de conversión a MP3 disponible:
+    if (backendUrl) {
       const storage = StorageService.getInstance();
       const musicDir = await storage.ensureMusicDirectory();
       const targetUri = `${musicDir}${cleanId}.mp3`;
-      const downloadEndpoint = `${backendUrl.replace(/\/$/, '')}/download-mp3?id=${encodeURIComponent(item.videoId)}`;
+      const downloadEndpoint = `${backendUrl}/download-mp3?id=${encodeURIComponent(item.videoId)}`;
 
       console.log(`[DownloadService] Iniciando descarga real de MP3 desde: ${downloadEndpoint}`);
 
       if (Platform.OS !== 'web') {
-        const downloadResult = await FileSystem.downloadAsync(downloadEndpoint, targetUri);
+        let downloadResult: FileSystem.FileSystemDownloadResult;
+        try {
+          downloadResult = await FileSystem.downloadAsync(downloadEndpoint, targetUri);
+        } catch {
+          await FileSystem.deleteAsync(targetUri, { idempotent: true }).catch(() => {});
+          throw new Error(
+            `No se pudo conectar con el servidor de descargas (${backendUrl}).\n` +
+              'Comprueba que el servidor está encendido en tu PC y que el iPhone está en la misma red Wi-Fi.'
+          );
+        }
+
+        // downloadAsync no falla con errores HTTP: si el servidor respondió con error,
+        // el archivo contiene el mensaje JSON y no audio. Lo borramos y mostramos el error.
+        if (downloadResult.status !== 200) {
+          let reason = `El servidor respondió con el código ${downloadResult.status}.`;
+          try {
+            const body = JSON.parse(await FileSystem.readAsStringAsync(downloadResult.uri));
+            if (body?.error) reason = body.details ? `${body.error}\n${body.details}` : body.error;
+          } catch (_) {}
+          await FileSystem.deleteAsync(downloadResult.uri, { idempotent: true }).catch(() => {});
+          throw new Error(reason);
+        }
+
         const fileInfo = await FileSystem.getInfoAsync(downloadResult.uri);
 
         const newSong: Song = {
